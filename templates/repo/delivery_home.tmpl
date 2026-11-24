@@ -1,0 +1,8 @@
+{{template "base/head" .}}
+<main class="page-content"><div class="ui container">
+<h1>业务工作台</h1><div class="flex-between"><h2>我的业务仓库</h2>{{if .SignedUser.IsAdmin}}<a class="ui primary button" href="{{AppSubUrl}}/repo/create">{{svg "octicon-plus"}} 初始化仓库</a>{{end}}</div>
+<div class="ui divided items">{{range .DeliveryRepos}}
+<div class="item"><div class="content"><a class="header" href="{{.Link}}/delivery">{{svg "octicon-repo"}} {{.FullName}}</a>{{if .Description}}<p>{{.Description}}</p>{{end}}</div><a class="ui button" href="{{.Link}}/delivery">进入交付</a></div>
+{{else}}<div class="ui segment">暂无可操作的仓库。管理员可以在仓库的业务交付页分配权限。</div>{{end}}</div>
+{{if .Prev}}<a href="?page={{.Prev}}">上一页</a>{{end}} {{if .Next}}<a href="?page={{.Next}}">下一页</a>{{end}}
+</div></main>{{template "base/footer" .}}

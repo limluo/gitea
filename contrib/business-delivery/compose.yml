@@ -1,0 +1,16 @@
+services:
+  gitea:
+    image: local/gitea-business:preview
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        GITEA_VERSION: "1.28.0-dev"
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    volumes:
+      - business-gitea:/data
+volumes:
+  business-gitea:

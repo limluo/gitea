@@ -559,6 +559,8 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
 		m.Get("/search", repo.SearchGlobalIssues)
 	}, reqSignIn)
 
+	m.Get("/-/delivery", reqSignIn, repo.DeliveryHome)
+	m.Post("/-/delivery/mcp/{repoid}", repo.DeliveryMCP)
 	m.Get("/pulls", reqSignIn, user.Pulls)
 	m.Get("/milestones", reqSignIn, reqMilestonesDashboardPageEnabled, user.Milestones)
 
@@ -1656,6 +1658,11 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
 	// end "/{username}/{reponame}/pulls/{index}": repo pull request
 
 	m.Group("/{username}/{reponame}", func() {
+		m.Group("/delivery", func() {
+			m.Get("", repo.Delivery)
+			m.Post("", repo.DeliveryPost)
+		}, reqSignIn, context.RepoRefByDefaultBranch())
+
 		m.Group("/activity_author_data", func() {
 			m.Get("", repo.ActivityAuthors)
 			m.Get("/{period}", repo.ActivityAuthors)

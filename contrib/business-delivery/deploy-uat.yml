@@ -1,0 +1,30 @@
+name: Deploy UAT
+on:
+  push:
+    branches: [uat]
+concurrency:
+  group: deploy-uat
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: uat
+    steps:
+      - name: Push revision to UAT
+        env:
+          TARGET: ${{ secrets.DEPLOY_HOST }}
+          LOGIN: ${{ secrets.DEPLOY_USER }}
+          PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEYS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          SOURCE_URL: ${{ gitea.server_url }}
+          REPO: ${{ gitea.repository }}
+          SHA: ${{ gitea.sha }}
+          TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -eu
+          umask 077
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          printf '%s\n' "$PRIVATE_KEY" > "$tmp/id"
+          printf '%s\n' "$HOST_KEYS" > "$tmp/hosts"
+          curl --fail --silent --show-error -H "Authorization: token $TOKEN" "$SOURCE_URL/api/v1/repos/$REPO/archive/$SHA.tar.gz" -o "$tmp/source.tar.gz"
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/hosts" -i "$tmp/id" -l "$LOGIN" -- "$TARGET" "/usr/local/bin/deploy-revision uat $SHA" < "$tmp/source.tar.gz"

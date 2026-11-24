@@ -1,0 +1,16 @@
+[Unit]
+Description=Gitea Business Delivery
+After=network.target
+
+[Service]
+Type=simple
+User=git
+Group=git
+WorkingDirectory=/var/lib/gitea-business
+Environment=GITEA_WORK_DIR=/var/lib/gitea-business
+ExecStart=/usr/local/bin/gitea-business web --config /var/lib/gitea-business/custom/conf/app.ini
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Example deployment target for a static web project with index.html at its root.
+set -eu
+umask 022
+branch=$1
+sha=$2
+case "$branch" in uat|main) ;; *) exit 2 ;; esac
+case "$sha" in ''|*[!a-f0-9]*) exit 2 ;; esac
+case "${#sha}" in 40|64) ;; *) exit 2 ;; esac
+root=/srv/business-site/$branch
+test -d "$root/releases"
+exec 9>"$root/.deploy.lock"
+flock -x 9
+stage=$(mktemp -d "$root/releases/.stage.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+tar --extract --gzip --strip-components=1 --no-same-owner --no-same-permissions --directory="$stage"
+test -s "$stage/index.html"
+if test ! -d "$root/releases/$sha"; then
+  mv "$stage" "$root/releases/$sha"
+fi
+# Keep the switch on the same filesystem as current.
+ln -s "releases/$sha" "$root/.next-$$"
+mv -Tf "$root/.next-$$" "$root/current"
+test -s "$root/current/index.html"

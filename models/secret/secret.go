@@ -185,6 +185,9 @@ func GetSecretsOfTask(ctx context.Context, task *actions_model.ActionTask) (map[
 		baseSecrets[secret.Name] = v
 	}
 
+	if err := loadDeliverySecrets(ctx, task.Job.Run, baseSecrets); err != nil {
+		return nil, err
+	}
 	return getScopedSecretsForJob(ctx, task.Job, baseSecrets)
 }
 

@@ -1,0 +1,65 @@
+{{template "base/head" .}}
+<main class="page-content repository">
+ {{template "repo/header" .}}
+ <div class="ui container">
+ {{template "base/alert" .}}
+ <h1>业务交付</h1>
+ <nav class="ui secondary pointing menu tw-flex-wrap">
+ {{if .CanReview}}<a class="{{if eq .DeliveryTab "reviews"}}active {{end}}item" href="?tab=reviews">合并审批</a>{{end}}
+ {{if .Targets}}<a class="{{if eq .DeliveryTab "releases"}}active {{end}}item" href="?tab=releases">发版操作</a>{{end}}
+ {{if .DeliveryAdmin}}
+ <a class="{{if eq .DeliveryTab "users"}}active {{end}}item" href="?tab=users">用户权限</a>
+ <a class="{{if eq .DeliveryTab "settings"}}active {{end}}item" href="?tab=settings">仓库管理</a>
+ <a class="{{if eq .DeliveryTab "agents"}}active {{end}}item" href="?tab=agents">MCP 授权</a>
+ <a class="{{if eq .DeliveryTab "environment"}}active {{end}}item" href="?tab=environment">部署环境</a>
+ {{end}}
+ <a class="item" href="{{.RepoLink}}">原生仓库</a>
+ </nav>
+ {{if eq .DeliveryTab "reviews"}}
+ <h2>待我审批</h2><p>合入目标 <strong>{{.DeliverySettings.Development}}</strong></p>
+ {{range .Pulls}}
+ <section class="ui segment">
+ <h3><a href="{{$.RepoLink}}/pulls/{{.Number}}">#{{.Number}}　{{.Title}}</a></h3>
+ <form method="post" class="ui form"><input type="hidden" name="number" value="{{.Number}}"><input type="hidden" name="head" value="{{.Head}}">
+ <div class="tw-flex tw-flex-wrap tw-items-center tw-gap-2">
+ {{if and $.merge .Head}}<button class="ui primary button" name="op" value="merge">确认合并</button>{{end}}
+ {{if and $.reject .Head}}<button class="ui button" name="op" value="reject">驳回</button>{{end}}
+ <a class="ui button" href="{{$.RepoLink}}/pulls/{{.Number}}/files">查看代码差异</a></div>
+ {{if and $.expert .Head}}<details class="tw-mt-3"><summary>请专家审查</summary><label>专家用户名 <input name="expert"></label><button class="ui button" name="op" value="expert">发送审查请求</button></details>{{end}}
+ </form></section>
+ {{else}}<div class="ui segment">当前没有待审批的 Agent 变更。</div>{{end}}
+ {{else if eq .DeliveryTab "releases"}}
+ <div class="ui secondary menu tw-flex-wrap">{{range .Targets}}<a class="{{if eq . $.Target}}active {{end}}item" href="?tab=releases&amp;branch={{.}}">{{.}}</a>{{end}}</div>
+ <section class="ui segment"><h2>{{.Target}} 环境</h2><div>分支当前版本　<code>{{.TargetHead}}</code></div><div>最近部署成功版本　{{if .Deployed}}<code>{{.Deployed}}</code>{{else}}暂无成功部署记录{{end}}</div><a href="{{.RepoLink}}/actions">查看流水线</a></section>
+ <h3>{{.DeliverySettings.Development}} 提交记录</h3>
+ <table class="ui unstackable table"><thead><tr><th>提交 / 变更</th><th>合入状态</th><th>操作</th></tr></thead><tbody>
+ {{range .Changes}}<tr><td>{{.Title}}<div><a href="{{$.RepoLink}}/commit/{{.SHA}}"><code>{{printf "%.10s" .SHA}}</code></a></div></td><td>{{if .Applied}}已合入{{else if .Common}}分支共有{{else}}待合入{{end}}</td><td>
+ <form method="post"><input type="hidden" name="head" value="{{$.TargetHead}}"><input type="hidden" name="sha" value="{{.SHA}}"><input type="hidden" name="branch" value="{{$.Target}}">
+ {{if .Applied}}{{if $.revoke}}<button class="ui small button" name="op" value="revoke">撤销发版</button>{{end}}{{else if and $.publish (not .Common)}}<button class="ui small primary button" name="op" value="publish">合并发版</button>{{end}}</form></td></tr>{{end}}
+ </tbody></table>
+ {{else if eq .DeliveryTab "settings"}}
+ <h2>仓库管理</h2><div class="ui buttons"><a class="ui button" href="{{AppSubUrl}}/repo/create">初始化仓库</a><a class="ui button" href="{{.RepoLink}}/settings">仓库信息</a><a class="ui button" href="{{.RepoLink}}/settings/branches">保护分支</a></div>
+ <form method="post" class="ui form segment"><div class="field"><label>开发分支<input name="development" required value="{{.DeliverySettings.Development}}"></label></div><div class="field"><label>Agent 的 Gitea 用户名<input name="agent" required value="{{.AgentName}}"></label></div><div class="field"><label>Agent 编码约束<textarea name="instructions" rows="5">{{.DeliverySettings.Instructions}}</textarea></label></div><button class="ui primary button" name="op" value="settings">保存仓库配置</button></form>
+ {{else if eq .DeliveryTab "users"}}
+ <h2>用户权限</h2><p><a href="{{AppSubUrl}}/-/admin/users">管理站点用户</a> · <a href="{{.RepoLink}}/settings/collaboration">管理仓库成员</a></p>
+ <form class="ui form segment" method="post"><div class="two fields"><label class="field">用户名<input name="login" required></label><label class="field">授权分支<input name="branch" required placeholder="develop、uat、main 或 *"></label></div>
+ <fieldset><legend>可见菜单及操作</legend><div class="tw-flex tw-flex-wrap tw-gap-3">
+ <label><input type="checkbox" name="buttons" value="review-view"> 审批列表</label><label><input type="checkbox" name="buttons" value="merge"> 合并</label><label><input type="checkbox" name="buttons" value="reject"> 驳回</label><label><input type="checkbox" name="buttons" value="expert"> 邀请专家</label><label><input type="checkbox" name="buttons" value="release-view"> 发版页</label><label><input type="checkbox" name="buttons" value="publish"> 发版</label><label><input type="checkbox" name="buttons" value="revoke"> 撤销</label></div></fieldset>
+ <p>保存会替换该用户在此分支的授权。清空选项可撤销该条授权。</p><button class="ui primary button" name="op" value="grant">保存授权</button></form>
+ <table class="ui table"><thead><tr><th>用户名</th><th>分支</th><th>已授予操作</th></tr></thead><tbody>{{range .Grants}}<tr><td>{{.Login}}</td><td>{{.Branch}}</td><td>{{.Buttons}}</td></tr>{{end}}</tbody></table>
+ {{else if eq .DeliveryTab "agents"}}
+ <h2>Agent MCP 授权</h2><section class="ui segment"><p>工作台 MCP 提供当前仓库的编码约束和目标开发分支。配置下方地址和 Bearer 密钥。</p><code>{{.MCPURL}}</code>
+ {{if .AgentName}}<p>已绑定账号 <strong>{{.AgentName}}</strong> · <a href="{{AppSubUrl}}/-/admin/users/{{.DeliverySettings.AgentID}}">管理原生 Agent 账号与令牌</a></p>
+ <form method="post"><input type="hidden" name="op" value="mcp-key"><button class="ui primary button" name="mode" value="issue">生成或轮换密钥</button><button class="ui button" name="mode" value="revoke">撤销密钥</button></form>
+ {{if .NewKey}}<p>请立即复制，此密钥仅显示一次。</p><code>{{.NewKey}}</code>{{end}}
+ {{else}}<a href="?tab=settings">先绑定 Agent 账号</a>{{end}}</section>
+ {{else if eq .DeliveryTab "environment"}}
+ <h2>部署环境</h2>{{if .Targets}}<form method="post" class="ui form segment"><div class="field"><label>受保护的目标分支<select name="branch">{{range .Targets}}<option>{{.}}</option>{{end}}</select></label></div><div class="two fields"><label class="field">服务器地址<input name="DEPLOY_HOST" required></label><label class="field">SSH 部署用户<input name="DEPLOY_USER" required></label></div>
+ <div class="field"><label>SSH 私钥<textarea rows="4" required name="DEPLOY_SSH_KEY" autocomplete="off"></textarea></label></div><div class="field"><label>核验后的 SSH known_hosts 记录<textarea rows="2" required name="DEPLOY_KNOWN_HOSTS"></textarea></label></div>
+ <button class="ui primary button" name="op" value="environment">加密保存连接信息</button></form>{{else}}<p>请先配置环境保护分支。</p>{{end}}
+ {{end}}
+ <div class="tw-flex tw-gap-3">{{if .Prev}}<a href="?tab={{.DeliveryTab}}&amp;branch={{.Target}}&amp;page={{.Prev}}">上一页</a>{{end}}{{if .Next}}<a href="?tab={{.DeliveryTab}}&amp;branch={{.Target}}&amp;page={{.Next}}">下一页</a>{{end}}</div>
+ </div></main>
+{{template "base/footer" .}}
+
+

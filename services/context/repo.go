@@ -658,6 +658,17 @@ func repoAssignmentPrepareTemplateData(ctx *Context, data *repoAssignmentPrepare
 	ctx.Data["Title"] = repo.Owner.Name + "/" + repo.Name
 	ctx.Data["PageTitleCommon"] = repo.Name + " - " + setting.AppName
 	ctx.Data["Repository"] = repo
+	if ctx.Doer != nil && ctx.Repo.Permission.CanRead(unit_model.TypeCode) {
+		visible := ctx.Doer.IsAdmin
+		if !visible {
+			visible, err = db.GetEngine(ctx).Where("repo_id=? AND user_id=? AND buttons<>?", repo.ID, ctx.Doer.ID, "").Exist(new(repo_model.DeliveryGrant))
+			if err != nil {
+				ctx.ServerErrorAuto(err)
+				return
+			}
+		}
+		ctx.Data["ShowDelivery"] = visible
+	}
 	ctx.Data["Owner"] = ctx.Repo.Repository.Owner
 	ctx.Data["CanWriteCode"] = ctx.Repo.Permission.CanWrite(unit_model.TypeCode)
 	ctx.Data["CanWriteIssues"] = ctx.Repo.Permission.CanWrite(unit_model.TypeIssues)

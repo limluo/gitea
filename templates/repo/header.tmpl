@@ -180,7 +180,8 @@
 						</a>
 					{{end}}
 
-					{{template "custom/extra_tabs" .}}
+					{{if .ShowDelivery}}<a class="{{if .PageIsDelivery}}active {{end}}item" href="{{.RepoLink}}/delivery">{{svg "octicon-workflow"}} 业务交付</a>{{end}}
+                    {{template "custom/extra_tabs" .}}
 
 					{{if .Permission.IsAdmin}}
 						<span class="item-flex-space"></span>
