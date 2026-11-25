@@ -7,7 +7,7 @@ sha=$2
 case "$branch" in uat|main) ;; *) exit 2 ;; esac
 case "$sha" in ''|*[!a-f0-9]*) exit 2 ;; esac
 case "${#sha}" in 40|64) ;; *) exit 2 ;; esac
-root=/srv/business-site/$branch
+root=${3:-/srv/business-site/$branch}
 test -d "$root/releases"
 exec 9>"$root/.deploy.lock"
 flock -x 9

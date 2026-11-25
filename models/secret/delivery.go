@@ -18,13 +18,23 @@ import (
 
 func loadDeliverySecrets(ctx context.Context, run *actions_model.ActionRun, dst map[string]string) error {
 	branch, ok := strings.CutPrefix(run.Ref, "refs/heads/")
-	if !ok || run.Event != "push" || run.IsScopedRun || run.IsForkPullRequest || run.WorkflowRepoID != run.RepoID || run.WorkflowID != "deploy-"+strings.ReplaceAll(branch, "/", "-")+".yml" {
+	if !ok || (run.Event != "push" && run.Event != "workflow_dispatch") || run.IsScopedRun || run.IsForkPullRequest || run.WorkflowRepoID != run.RepoID {
 		return nil
 	}
 	var env repo_model.DeliveryEnvironment
 	exists, err := db.GetEngine(ctx).Where("repo_id=? AND branch=?", run.RepoID, branch).Get(&env)
 	if err != nil || !exists {
 		return err
+	}
+	workflow, event := env.Workflow, env.TriggerEvent
+	if workflow == "" {
+		workflow = "deploy-" + strings.ReplaceAll(branch, "/", "-") + ".yml"
+	}
+	if event == "" {
+		event = "push"
+	}
+	if workflow != run.WorkflowID || event != string(run.Event) {
+		return nil
 	}
 	protected, err := git_model.IsBranchProtected(ctx, run.RepoID, branch)
 	if err != nil || !protected {
@@ -37,6 +47,9 @@ func loadDeliverySecrets(ctx context.Context, run *actions_model.ActionRun, dst 
 	var values map[string]string
 	if err = json.Unmarshal([]byte(value), &values); err != nil {
 		return err
+	}
+	if alias := values["DEPLOY_KEY_ALIAS"]; alias != "" {
+		dst[alias] = values["DEPLOY_SSH_KEY"]
 	}
 	for k, v := range values {
 		dst[k] = v

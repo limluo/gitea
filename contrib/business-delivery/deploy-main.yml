@@ -1,5 +1,6 @@
 name: Deploy Production
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 concurrency:
@@ -15,6 +16,11 @@ jobs:
           LOGIN: ${{ secrets.DEPLOY_USER }}
           PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST_KEYS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+          ARTIFACT: ${{ secrets.DEPLOY_ARTIFACT }}
+          TIME_LIMIT: ${{ secrets.DEPLOY_TIMEOUT }}
+          HEALTH_PATH: ${{ secrets.DEPLOY_HEALTH }}
           SOURCE_URL: ${{ gitea.server_url }}
           REPO: ${{ gitea.repository }}
           SHA: ${{ gitea.sha }}
@@ -26,6 +32,17 @@ jobs:
           trap 'rm -rf "$tmp"' EXIT
           printf '%s\n' "$PRIVATE_KEY" > "$tmp/id"
           printf '%s\n' "$HOST_KEYS" > "$tmp/hosts"
-          curl --fail --silent --show-error -H "Authorization: token $TOKEN" "$SOURCE_URL/api/v1/repos/$REPO/archive/$SHA.tar.gz" -o "$tmp/source.tar.gz"
-          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/hosts" -i "$tmp/id" -l "$LOGIN" -- "$TARGET" "/usr/local/bin/deploy-revision main $SHA" < "$tmp/source.tar.gz"
-
+          test -n "$PRIVATE_KEY" && test -n "$HOST_KEYS"
+          git init -q "$tmp/src"
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $auth" git -C "$tmp/src" fetch -q --depth=1 "$SOURCE_URL/$REPO.git" "$SHA"
+          tree="$SHA"
+          if [ -n "$ARTIFACT" ] && [ "$ARTIFACT" != "." ]; then
+            tree="$SHA:${ARTIFACT%/}"
+          fi
+          git -C "$tmp/src" archive --format=tar.gz --prefix=release/ -o "$tmp/source.tar.gz" "$tree"
+          case "$DEPLOY_DIR" in *[!a-zA-Z0-9_./-]*) exit 2 ;; esac
+          timeout "${TIME_LIMIT:-300}" ssh -p "${PORT:-22}" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/hosts" -i "$tmp/id" -l "$LOGIN" -- "$TARGET" "/usr/local/bin/deploy-revision main $SHA '$DEPLOY_DIR'" < "$tmp/source.tar.gz"
+          if [ -n "$HEALTH_PATH" ]; then
+            curl --fail --silent --show-error --max-time "${TIME_LIMIT:-300}" "https://$TARGET$HEALTH_PATH" >/dev/null
+          fi
