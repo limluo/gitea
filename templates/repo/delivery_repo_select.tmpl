@@ -1,0 +1,1 @@
+<select data-delivery-repo aria-label="选择仓库">{{range .WorkspaceRepos}}<option value="{{.Link}}/delivery?tab={{$.DeliveryTab}}" {{if eq .ID $.Repository.ID}}selected{{end}}>{{.Name}}</option>{{end}}</select>

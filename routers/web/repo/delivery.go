@@ -57,22 +57,42 @@ func (d *deliveryContext) allowed(branch, button string) bool {
 		return true
 	}
 	for _, g := range d.grants {
-		if (g.Branch == "*" || g.Branch == branch) && slices.Contains(strings.Fields(g.Buttons), button) {
+		if g.Branch != "*" && g.Branch != branch {
+			continue
+		}
+		keys := strings.Fields(g.Buttons)
+		if slices.Contains(keys, "scoped") {
+			if !slices.Contains(keys, button) {
+				continue
+			}
+			guard := map[string]string{"review-view": "read", "branches": "read", "release-view": "read", "task": "submit-pr", "merge": "merge-pr", "publish": "deploy", "revoke": "deploy"}[button]
+			if guard == "" || slices.Contains(keys, guard) {
+				return true
+			}
+		} else if slices.Contains(keys, button) || (button == "branches" && slices.Contains(keys, "review-view")) {
 			return true
 		}
 	}
 	return false
 }
 
+func (d *deliveryContext) manage(ctx *context.Context, page string) bool {
+	return d.admin || (ctx.Repo.Permission.IsAdmin() && d.allowed("*", page))
+}
+
 type deliveryChange struct {
-	SHA, Title, Applied string
-	Common              bool
-	Acceptance          string
-	Blocked             bool
+	Feedback                    string
+	SHA, Title, Applied, Status string
+	Number                      int64
+	Common                      bool
+	Acceptance                  string
+	Blocked                     bool
 }
 type deliveryPull struct {
 	Number                          int64
 	Title, Head, Description, State string
+	History                         []repo_model.DeliveryRecord
+	Mine                            bool
 }
 
 func deliveryLedger(ctx *context.Context, head string) (map[string]string, error) {
@@ -125,7 +145,15 @@ func Delivery(ctx *context.Context) {
 		}
 	}
 	canReview := d.allowed(d.settings.Development, "review-view") && ctx.Repo.Permission.CanRead(unit.TypePullRequests)
-	if !canReview && len(targets) == 0 && !d.admin {
+	canBranches := d.allowed(d.settings.Development, "branches") && ctx.Repo.Permission.CanRead(unit.TypePullRequests)
+	ctx.Data["CanBranches"] = canBranches
+	tech := d.admin || (canReview && d.allowed(d.settings.Development, "expert") && ctx.Repo.Permission.CanWrite(unit.TypePullRequests))
+	for _, page := range []string{"users", "settings", "agents", "environment"} {
+		ok := d.manage(ctx, page)
+		ctx.Data["manage"+page] = ok
+		tech = tech || ok
+	}
+	if !canReview && !canBranches && len(targets) == 0 && !tech {
 		ctx.HTTPError(403)
 		return
 	}
@@ -138,6 +166,18 @@ func Delivery(ctx *context.Context) {
 	ctx.Data["DeliveryAdmin"] = d.admin
 	ctx.Data["DeliverySettings"] = d.settings
 	ctx.Data["DeliveryTab"] = tab
+	repos, e := workbenchRepos(ctx, tab)
+	if e != nil {
+		ctx.ServerErrorAuto(e)
+		return
+	}
+	ctx.Data["WorkspaceRepos"] = repos
+	ctx.Data["EditRepo"] = ctx.FormBool("edit")
+	ctx.Data["Crumb"] = map[string]string{"overview": "交付总览", "reviews": "Agent 合并审批", "branches": "需求与分支", "releases": "发版操作", "users": "用户管理", "settings": "仓库管理", "agents": "MCP 管理及授权", "environment": "部署环境"}[tab]
+	ctx.Data["TechRole"] = tech
+	c, cookieErr := ctx.Req.Cookie("delivery-view")
+	tech = tech && cookieErr == nil && c.Value == "tech"
+	ctx.Data["TechView"] = tech
 	ctx.Data["MCPURL"] = setting.AppURL + "-/delivery/mcp/" + strconv.FormatInt(d.settings.RepoID, 10)
 	ctx.Data["CanReview"] = canReview
 	ctx.Data["Targets"] = targets
@@ -151,7 +191,7 @@ func Delivery(ctx *context.Context) {
 			return
 		}
 	case "branches":
-		if !canReview {
+		if !canBranches {
 			ctx.HTTPError(403)
 			return
 		}
@@ -166,7 +206,36 @@ func Delivery(ctx *context.Context) {
 			return
 		}
 		var prs []*issues_model.PullRequest
-		queue := ctx.FormString("queue", "pending")
+		defaultQueue := "pending"
+		if tech {
+			defaultQueue = "expert"
+		}
+		queue := ctx.FormString("queue", defaultQueue)
+		if n := ctx.FormInt64("pr"); n > 0 {
+			pr, e := issues_model.GetPullRequestByIndex(ctx, d.settings.RepoID, n)
+			if e != nil {
+				ctx.NotFound()
+				return
+			}
+			if e = pr.LoadIssue(ctx); e != nil {
+				ctx.ServerErrorAuto(e)
+				return
+			}
+			if pr.Issue.IsClosed {
+				queue = "done"
+			} else {
+				requested, e := db.GetEngine(ctx).Where("issue_id=? AND type=?", pr.IssueID, issues_model.ReviewTypeRequest).Exist(new(issues_model.Review))
+				if e != nil {
+					ctx.ServerErrorAuto(e)
+					return
+				}
+				if requested {
+					queue = "expert"
+				} else {
+					queue = "pending"
+				}
+			}
+		}
 		ctx.Data["Queue"] = queue
 		q := db.GetEngine(ctx).Table("pull_request").Select("pull_request.*").Join("INNER", "issue", "issue.id=pull_request.issue_id").Where("pull_request.base_repo_id=? AND pull_request.base_branch=? AND "+deliveryPullAuthor+" AND issue.is_closed=?", d.settings.RepoID, d.settings.Development, d.settings.AgentID, queue == "done")
 		switch queue {
@@ -178,6 +247,10 @@ func Delivery(ctx *context.Context) {
 		default:
 			ctx.HTTPError(400)
 			return
+		}
+		if n := ctx.FormInt64("pr"); n > 0 {
+			q = q.Where("pull_request.`index`=?", n)
+			ctx.Data["OpenPR"] = n
 		}
 		err = q.Desc("pull_request.id").Limit(21, (page-1)*20).Find(&prs)
 		if err != nil {
@@ -231,7 +304,17 @@ func Delivery(ctx *context.Context) {
 					state = outcome.Kind + " · " + outcome.Detail
 				}
 			}
-			rows = append(rows, deliveryPull{pr.Index, pr.Issue.Title, head, description, state})
+			var history []repo_model.DeliveryRecord
+			if e = db.GetEngine(ctx).Where("repo_id=? AND subject=?", d.settings.RepoID, fmt.Sprintf("PR #%d", pr.Index)).Asc("id").Find(&history); e != nil {
+				ctx.ServerErrorAuto(e)
+				return
+			}
+			mine, e := db.GetEngine(ctx).Where("issue_id=? AND reviewer_id=? AND type=?", pr.IssueID, ctx.Doer.ID, issues_model.ReviewTypeRequest).Exist(new(issues_model.Review))
+			if e != nil {
+				ctx.ServerErrorAuto(e)
+				return
+			}
+			rows = append(rows, deliveryPull{pr.Index, pr.Issue.Title, head, description, state, history, mine})
 		}
 		ctx.Data["Pulls"] = rows
 		for _, k := range []string{"merge", "reject", "expert"} {
@@ -252,32 +335,60 @@ func Delivery(ctx *context.Context) {
 			ctx.ServerErrorAuto(e)
 			return
 		}
-		raw, _, e := gitcmd.NewCommand("log", "--first-parent", "--max-count=21", "--format=%H%x09%s").AddOptionFormat("--skip=%d", (page-1)*20).AddDynamicArguments(git.RefNameFromBranch(d.settings.Development).String()).WithRepo(ctx.Repo.GitRepo).RunStdString(ctx)
-		if e != nil {
+		var prs []issues_model.PullRequest
+		if e := db.GetEngine(ctx).Where("base_repo_id=? AND base_branch=? AND has_merged=? AND merged_commit_id<>?", d.settings.RepoID, d.settings.Development, true, "").Desc("merged_unix", "id").Limit(21, (page-1)*20).Find(&prs); e != nil {
 			ctx.ServerErrorAuto(e)
 			return
+		}
+		if len(prs) > 20 {
+			ctx.Data["Next"] = page + 1
+			prs = prs[:20]
 		}
 		acceptance, e := loadAcceptance(ctx, d)
 		if e != nil {
 			ctx.ServerErrorAuto(e)
 			return
 		}
-		var changes []deliveryChange
-		for line := range strings.SplitSeq(strings.TrimSuffix(raw, "\n"), "\n") {
-			sha, title, ok := strings.Cut(line, "\t")
-			if !ok {
-				continue
+		deployedLedger := map[string]string{}
+		if ctx.Repo.Permission.CanRead(unit.TypeActions) {
+			deployed, e := deployedRevision(ctx, branch)
+			if e != nil {
+				ctx.ServerErrorAuto(e)
+				return
 			}
-			if len(changes) == 20 {
-				ctx.Data["Next"] = page + 1
-				break
+			if deployed != "" {
+				deployedLedger, e = deliveryLedger(ctx, deployed)
+				if e != nil {
+					ctx.ServerErrorAuto(e)
+					return
+				}
+			}
+		}
+		var changes []deliveryChange
+		for _, pr := range prs {
+			sha := pr.MergedCommitID
+			if e := pr.LoadIssue(ctx); e != nil {
+				ctx.ServerErrorAuto(e)
+				return
 			}
 			common, e := git.IsCommitInBranch(ctx, ctx.Repo.GitRepo, sha, branch)
 			if e != nil {
 				ctx.ServerErrorAuto(e)
 				return
 			}
-			changes = append(changes, deliveryChange{sha, title, ledger[sha], common, acceptance.passed[sha], branch == "main" && acceptance.gate && acceptance.passed[sha] != "验收通过"})
+			applied, recorded := ledger[sha]
+			status := "待发布"
+			switch {
+			case applied != "" && deployedLedger[sha] == applied:
+				status = "已合并 · 已部署"
+			case applied != "":
+				status = "已合并 · 等待部署"
+			case recorded:
+				status = "已撤销"
+			case common:
+				status = "分支共有"
+			}
+			changes = append(changes, deliveryChange{SHA: sha, Title: pr.Issue.Title, Applied: applied, Number: pr.Index, Status: status, Common: common, Acceptance: acceptance.passed[sha], Feedback: acceptance.notes[sha], Blocked: branch == "main" && acceptance.gate && acceptance.passed[sha] != "验收通过"})
 		}
 		ctx.Data["Changes"] = changes
 		ctx.Data["TargetHead"] = head
@@ -301,7 +412,7 @@ func Delivery(ctx *context.Context) {
 			}
 		}
 	case "settings", "users", "agents", "environment":
-		if !d.admin {
+		if !d.manage(ctx, tab) {
 			ctx.HTTPError(403)
 			return
 		}
@@ -329,9 +440,13 @@ func Delivery(ctx *context.Context) {
 		}
 		if tab == "users" {
 			var accounts []user_model.User
-			if e := db.GetEngine(ctx).Cols("id", "name").Where("is_active=? AND prohibit_login=?", true, false).In("type", []user_model.UserType{user_model.UserTypeIndividual, user_model.UserTypeBot}).Asc("lower_name").Limit(100).Find(&accounts); e != nil {
+			if e := db.GetEngine(ctx).Cols("id", "name").Where("is_active=? AND prohibit_login=?", true, false).In("type", []user_model.UserType{user_model.UserTypeIndividual, user_model.UserTypeBot}).Asc("lower_name").Limit(101, (page-1)*100).Find(&accounts); e != nil {
 				ctx.ServerErrorAuto(e)
 				return
+			}
+			if len(accounts) > 100 {
+				ctx.Data["Next"] = page + 1
+				accounts = accounts[:100]
 			}
 			ctx.Data["Accounts"] = accounts
 			var rows []repo_model.DeliveryGrant
@@ -341,9 +456,11 @@ func Delivery(ctx *context.Context) {
 				return
 			}
 			type grantView struct{ Login, Branch, Buttons string }
-			labels := map[string]string{"review-view": "审批列表", "merge": "合并", "reject": "驳回", "expert": "邀请专家", "release-view": "发版页", "publish": "发版", "revoke": "撤销", "task": "创建需求分支"}
+			labels := map[string]string{"review-view": "审批列表", "merge": "合并", "reject": "驳回", "expert": "邀请专家", "release-view": "发版页", "publish": "发版", "revoke": "撤销", "task": "新建需求分支", "read": "读取", "submit-pr": "提交 PR", "merge-pr": "合并 PR", "deploy": "发布", "settings": "仓库管理", "users": "用户管理", "environment": "部署环境", "agents": "MCP 管理及授权", "branches": "需求与分支"}
 			var views []grantView
 			selected := map[string]bool{}
+			ctx.Data["ManagementMenus"] = map[string]string{"settings": "仓库管理", "users": "用户管理", "agents": "MCP 管理及授权", "environment": "部署环境"}
+			ctx.Data["BranchOps"] = map[string]string{"read": "读取", "submit-pr": "提交 PR", "merge-pr": "合并 PR", "deploy": "发布"}
 			ctx.Data["EditLogin"] = ctx.FormTrim("user")
 			ctx.Data["EditBranch"] = ctx.FormTrim("scope")
 			ctx.Data["SelectedButtons"] = selected
@@ -360,7 +477,19 @@ func Delivery(ctx *context.Context) {
 					return
 				}
 				var ops []string
-				for _, key := range strings.Fields(g.Buttons) {
+				keys := strings.Fields(g.Buttons)
+				if !slices.Contains(keys, "scoped") {
+					keys = append(keys, "read")
+					for k, v := range map[string]string{"review-view": "branches", "task": "submit-pr", "merge": "merge-pr", "publish": "deploy", "revoke": "deploy"} {
+						if slices.Contains(keys, k) && !slices.Contains(keys, v) {
+							keys = append(keys, v)
+						}
+					}
+				}
+				for _, key := range keys {
+					if key == "scoped" {
+						continue
+					}
 					ops = append(ops, labels[key])
 					if u.Name == ctx.FormTrim("user") && g.Branch == ctx.FormTrim("scope") {
 						selected[key] = true
@@ -387,8 +516,27 @@ func DeliveryPost(ctx *context.Context) {
 	branch := ctx.FormString("branch")
 	dest := ctx.Repo.RepoLink + "/delivery?"
 	switch op {
+	case "init-repo", "save-repo":
+		if !d.manage(ctx, "settings") || (op == "init-repo" && !d.admin) {
+			ctx.HTTPError(403)
+			return
+		}
+		var link string
+		link, err = saveWorkbenchRepo(ctx, op == "init-repo")
+		if link != "" {
+			dest = link
+		} else {
+			dest += "tab=settings"
+		}
+	case "submit-task":
+		if !d.allowed(d.settings.Development, "branches") || !d.allowed(d.settings.Development, "task") || !ctx.Repo.Permission.CanWrite(unit.TypeCode) || !ctx.Repo.Repository.CanContentChange() {
+			ctx.HTTPError(403)
+			return
+		}
+		err = submitDeliveryPR(ctx, d)
+		dest += "tab=branches"
 	case "create-task":
-		if !d.allowed(d.settings.Development, "task") || !d.allowed(d.settings.Development, "review-view") || !ctx.Repo.Permission.CanWrite(unit.TypeCode) || !ctx.Repo.Repository.CanContentChange() {
+		if !d.allowed(d.settings.Development, "task") || !d.allowed(d.settings.Development, "branches") || !ctx.Repo.Permission.CanWrite(unit.TypeCode) || !ctx.Repo.Repository.CanContentChange() {
 			ctx.HTTPError(403)
 			return
 		}
@@ -436,7 +584,7 @@ func DeliveryPost(ctx *context.Context) {
 		err = recordDelivery(ctx, result, branch, sha, applied, note)
 		dest += "tab=releases&branch=uat"
 	case "tool-grant":
-		if !d.admin {
+		if !d.manage(ctx, "agents") {
 			ctx.HTTPError(403)
 			return
 		}
@@ -475,7 +623,7 @@ func DeliveryPost(ctx *context.Context) {
 		Delivery(ctx)
 		return
 	case "mcp-key":
-		if !d.admin || d.settings.AgentID == 0 {
+		if !d.manage(ctx, "agents") || d.settings.AgentID == 0 {
 			ctx.HTTPError(403)
 			return
 		}
@@ -507,7 +655,7 @@ func DeliveryPost(ctx *context.Context) {
 		Delivery(ctx)
 		return
 	case "environment":
-		if !d.admin {
+		if !d.manage(ctx, "environment") {
 			ctx.HTTPError(403)
 			return
 		}
@@ -585,7 +733,11 @@ func DeliveryPost(ctx *context.Context) {
 		}
 		dest += "tab=environment"
 	case "settings", "grant":
-		if !d.admin {
+		page := "users"
+		if op == "settings" {
+			page = "settings"
+		}
+		if !d.manage(ctx, page) {
 			ctx.HTTPError(403)
 			return
 		}
@@ -626,10 +778,13 @@ func DeliveryPost(ctx *context.Context) {
 			}
 			buttons := ctx.FormStrings("buttons")
 			for _, v := range buttons {
-				if !slices.Contains([]string{"review-view", "merge", "reject", "expert", "release-view", "publish", "revoke", "task"}, v) {
+				if !slices.Contains([]string{"review-view", "merge", "reject", "expert", "release-view", "publish", "revoke", "task", "read", "merge-pr", "submit-pr", "deploy", "branches", "settings", "users", "agents", "environment"}, v) {
 					ctx.HTTPError(400)
 					return
 				}
+			}
+			if len(buttons) > 0 && ctx.FormBool("scoped") {
+				buttons = append(buttons, "scoped")
 			}
 			g := repo_model.DeliveryGrant{RepoID: d.settings.RepoID, Branch: branch, UserID: u.ID}
 			exists, e := db.GetEngine(ctx).Get(&g)
@@ -761,6 +916,17 @@ func DeliveryPost(ctx *context.Context) {
 			return
 		}
 		sha := ctx.FormString("sha")
+		if op == "publish" {
+			ok, e := db.GetEngine(ctx).Where("base_repo_id=? AND base_branch=? AND has_merged=? AND merged_commit_id=?", d.settings.RepoID, d.settings.Development, true, sha).Exist(new(issues_model.PullRequest))
+			if e != nil {
+				ctx.ServerErrorAuto(e)
+				return
+			}
+			if !ok {
+				ctx.HTTPError(409, "仅可发布已合并的 PR")
+				return
+			}
+		}
 		commit, e := ctx.Repo.GitRepo.GetCommit(ctx, sha)
 		if e != nil || commit.ID.String() != sha {
 			ctx.HTTPError(400)

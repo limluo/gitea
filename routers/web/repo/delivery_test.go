@@ -19,3 +19,9 @@ func TestDeliveryGrantScope(t *testing.T) {
 		}
 	}
 }
+func TestWorkbenchScopedGrant(t *testing.T) {
+	d := deliveryContext{grants: []repo_model.DeliveryGrant{{Branch: "dev", Buttons: "scoped branches read merge"}, {Branch: "uat", Buttons: "scoped release-view read publish deploy"}}}
+	if !d.allowed("dev", "branches") || d.allowed("dev", "merge") || !d.allowed("uat", "publish") || d.allowed("main", "publish") || d.allowed("uat", "revoke") {
+		t.Fatal("menu, button and branch operations must respect each grant scope")
+	}
+}

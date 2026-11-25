@@ -66,7 +66,13 @@ func deliveryOverview(ctx *context.Context, d *deliveryContext, targets []string
 	ctx.Data["Versions"] = versions
 	if review {
 		var inbox []issues_model.Issue
-		err := db.GetEngine(ctx).Table("issue").Select("issue.*").Join("INNER", "pull_request", "issue.id=pull_request.issue_id").Where("issue.repo_id=? AND "+deliveryPullAuthor+" AND issue.is_closed=? AND pull_request.base_branch=?", d.settings.RepoID, d.settings.AgentID, false, d.settings.Development).Desc("issue.id").Limit(6).Find(&inbox)
+		q := db.GetEngine(ctx).Table("issue").Select("issue.*").Join("INNER", "pull_request", "issue.id=pull_request.issue_id").Where("issue.repo_id=? AND "+deliveryPullAuthor+" AND issue.is_closed=? AND pull_request.base_branch=?", d.settings.RepoID, d.settings.AgentID, false, d.settings.Development)
+		filter := "NOT EXISTS (SELECT 1 FROM review WHERE review.issue_id=issue.id AND review.type=?)"
+		if ctx.Data["TechView"] == true {
+			filter = "EXISTS (SELECT 1 FROM review WHERE review.issue_id=issue.id AND review.type=?)"
+		}
+		count, err := q.Where(filter, issues_model.ReviewTypeRequest).Desc("issue.id").Limit(6).FindAndCount(&inbox)
+		ctx.Data["InboxCount"] = count
 		if err != nil {
 			return err
 		}
@@ -78,7 +84,7 @@ func deliveryOverview(ctx *context.Context, d *deliveryContext, targets []string
 	}
 	var events []repo_model.DeliveryRecord
 	if len(branches) > 0 {
-		if err := db.GetEngine(ctx).Where("repo_id=?", d.settings.RepoID).In("branch", branches).Desc("id").Limit(12).Find(&events); err != nil {
+		if err := db.GetEngine(ctx).Where("repo_id=?", d.settings.RepoID).In("branch", branches).Desc("id").Limit(5).Find(&events); err != nil {
 			return err
 		}
 	}
@@ -109,6 +115,8 @@ func createDeliveryTask(ctx *context.Context, d *deliveryContext) error {
 type taskRow struct {
 	Title, Criteria, Branch, State string
 	Number                         int64
+	PRs                            []int64
+	Note                           string
 }
 
 func deliveryTasks(ctx *context.Context, d *deliveryContext) error {
@@ -117,6 +125,9 @@ func deliveryTasks(ctx *context.Context, d *deliveryContext) error {
 		return err
 	}
 	var rows []taskRow
+	counts := map[string]int{"全部": len(tasks)}
+	stage := ctx.FormString("stage")
+	ctx.Data["Stage"] = stage
 	for _, t := range tasks {
 		row := taskRow{Title: t.Subject, Criteria: t.Detail, Branch: t.Revision, State: "开发中"}
 		var pr issues_model.PullRequest
@@ -129,6 +140,9 @@ func deliveryTasks(ctx *context.Context, d *deliveryContext) error {
 				return err
 			}
 			row.Number = pr.Index
+			if e := db.GetEngine(ctx).Table("pull_request").Where("base_repo_id=? AND head_repo_id=? AND base_branch=? AND head_branch=?", d.settings.RepoID, d.settings.RepoID, d.settings.Development, t.Revision).Desc("id").Cols("index").Find(&row.PRs); e != nil {
+				return e
+			}
 			switch {
 			case pr.HasMerged:
 				row.State = "已并入开发分支"
@@ -144,19 +158,36 @@ func deliveryTasks(ctx *context.Context, d *deliveryContext) error {
 			}
 			if ok && pr.Issue.IsClosed && !pr.HasMerged {
 				row.State = "修改中"
+				row.Note = last.Detail
 			}
 		}
+		counts[row.State]++
 		if filter := ctx.FormString("stage"); filter == "" || row.State == filter {
 			rows = append(rows, row)
 		}
 	}
+	type stageTab struct {
+		Name, Value string
+		Count       int
+	}
+	var tabs []stageTab
+	for _, v := range []string{"全部", "开发中", "修改中", "已提交 PR", "已并入开发分支", "已关闭"} {
+		if counts[v] > 0 || v == "全部" {
+			value := v
+			if v == "全部" {
+				value = ""
+			}
+			tabs = append(tabs, stageTab{v, value, counts[v]})
+		}
+	}
+	ctx.Data["Stages"] = tabs
 	ctx.Data["Tasks"] = rows
 	return nil
 }
 
 type acceptanceState struct {
-	applied, passed map[string]string
-	gate            bool
+	applied, passed, notes map[string]string
+	gate                   bool
 }
 
 func loadAcceptance(ctx *context.Context, d *deliveryContext) (acceptanceState, error) {
@@ -186,6 +217,10 @@ func loadAcceptance(ctx *context.Context, d *deliveryContext) (acceptanceState, 
 	for _, r := range rows {
 		if r.Revision == state.applied[r.Subject] {
 			state.passed[r.Subject] = r.Kind
+			if state.notes == nil {
+				state.notes = map[string]string{}
+			}
+			state.notes[r.Subject] = r.Detail
 		}
 	}
 	return state, err

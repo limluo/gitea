@@ -560,6 +560,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
 	}, reqSignIn)
 
 	m.Get("/-/delivery", reqSignIn, repo.DeliveryHome)
+	m.Post("/-/delivery/create", reqSignIn, repo.CreateWorkbenchRepo)
 	m.Post("/-/delivery/mcp/{repoid}", repo.DeliveryMCP)
 	m.Get("/pulls", reqSignIn, user.Pulls)
 	m.Get("/milestones", reqSignIn, reqMilestonesDashboardPageEnabled, user.Milestones)

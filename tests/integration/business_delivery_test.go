@@ -30,8 +30,14 @@ func TestBusinessDeliveryPages(t *testing.T) {
 	reader.MakeRequest(t, NewRequestWithValues(t, "POST", "/user2/repo1/delivery", map[string]string{"op": "grant", "login": "user2", "branch": "*"}), http.StatusForbidden)
 }
 
+func mergedBusinessFixture(t *testing.T) {
+	t.Helper()
+	_, err := db.GetEngine(t.Context()).Exec("UPDATE pull_request SET base_branch=?, merged_commit_id=? WHERE id=1", "branch2", "5c050d3b6d2db231ab1f64e324f1b6b9a0b181c2")
+	require.NoError(t, err)
+}
 func TestBusinessReleaseAndRevoke(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, _ *url.URL) {
+		mergedBusinessFixture(t)
 		admin := loginUser(t, "user1")
 		path := "/user2/repo1/delivery"
 		admin.MakeRequest(t, NewRequestWithValues(t, "POST", path, map[string]string{"op": "settings", "development": "branch2", "agent": "user2"}), 303)
@@ -42,7 +48,7 @@ func TestBusinessReleaseAndRevoke(t *testing.T) {
 			return NewHTMLParser(t, resp.Body)
 		}
 		page := visit()
-		form := page.Find("tr").FilterFunction(func(_ int, s *goquery.Selection) bool { return strings.Contains(s.Text(), "a change") }).Find("form")
+		form := page.Find("tr").FilterFunction(func(_ int, s *goquery.Selection) bool { return strings.Contains(s.Text(), "issue2") }).Find("form")
 		require.Equal(t, 1, form.Length())
 		sha := form.Find("[name=sha]").AttrOr("value", "")
 		head := form.Find("[name=head]").AttrOr("value", "")
@@ -63,6 +69,7 @@ func TestBusinessReleaseAndRevoke(t *testing.T) {
 
 func TestBusinessUATAcceptance(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, _ *url.URL) {
+		mergedBusinessFixture(t)
 		admin := loginUser(t, "user1")
 		path := "/user2/repo1/delivery"
 		post := func(b map[string]string, status int) {
@@ -76,7 +83,7 @@ func TestBusinessUATAcceptance(t *testing.T) {
 		}
 		form := func(b string) *goquery.Selection {
 			resp := admin.MakeRequest(t, NewRequest(t, "GET", path+"?tab=releases&branch="+b), 200)
-			s := NewHTMLParser(t, resp.Body).Find("tr").FilterFunction(func(_ int, row *goquery.Selection) bool { return strings.Contains(row.Text(), "a change") }).Find("form")
+			s := NewHTMLParser(t, resp.Body).Find("tr").FilterFunction(func(_ int, row *goquery.Selection) bool { return strings.Contains(row.Text(), "issue2") }).Find("form")
 			require.Equal(t, 1, s.Length())
 			return s
 		}
@@ -123,4 +130,40 @@ func TestBusinessToolGrant(t *testing.T) {
 	require.NotEmpty(t, id)
 	admin.MakeRequest(t, NewRequestWithValues(t, "POST", path, map[string]string{"op": "tool-grant", "mode": "revoke", "grant": id}), 303)
 	call("tools/list", "", 401)
+}
+
+func TestBusinessWorkbenchJourney(t *testing.T) {
+	onGiteaRun(t, func(t *testing.T, _ *url.URL) {
+		admin := loginUser(t, "user1")
+		path := "/user1/business-journey/delivery"
+		req := NewRequestWithValues(t, "POST", "/-/delivery/create", map[string]string{"op": "init-repo", "name": "business-journey", "development": "dev", "protected": "main,uat", "agent": "user1", "description": "交付测试"})
+		result := admin.MakeRequest(t, req, 303)
+		require.Contains(t, result.Header().Get("Location"), path)
+		get := func(tab string) *HTMLDoc {
+			return NewHTMLParser(t, admin.MakeRequest(t, NewRequest(t, "GET", path+"?tab="+tab), 200).Body)
+		}
+		settings := get("settings&edit=1")
+		require.Equal(t, 1, settings.Find("dialog[data-delivery-open]").Length())
+		require.Contains(t, settings.Find("dialog[data-delivery-open] [name=original]").AttrOr("value", ""), "uat")
+		post := func(values map[string]string) {
+			admin.MakeRequest(t, NewRequestWithValues(t, "POST", path, values), 303)
+		}
+		post(map[string]string{"op": "create-task", "title": "订单导出", "criteria": "导出列完整", "feature": "feature/export"})
+		post(map[string]string{"op": "submit-task", "feature": "feature/export"})
+		require.Equal(t, 0, get("reviews").Find("[data-review-form]").Length())
+		testCreateFile(t, admin, "user1", "business-journey", "feature/export", "", "export.txt", "order export")
+		post(map[string]string{"op": "submit-task", "feature": "feature/export"})
+		pr := get("reviews&pr=1")
+		require.Equal(t, 1, pr.Find("dialog[data-delivery-open]").Length())
+		head := pr.Find("[name=head]").AttrOr("value", "")
+		require.NotEmpty(t, head)
+		diff := pr.Find("[data-delivery-diff]").AttrOr("data-delivery-diff", "")
+		require.Contains(t, admin.MakeRequest(t, NewRequest(t, "GET", diff), 200).Body.String(), "export.txt")
+		post(map[string]string{"op": "revise", "number": "1", "head": head, "note": "补充日期列"})
+		require.Contains(t, get("branches&stage=修改中").Find("main").Text(), "补充日期列")
+		testCreateFile(t, admin, "user1", "business-journey", "feature/export", "", "date.txt", "date")
+		post(map[string]string{"op": "submit-task", "feature": "feature/export"})
+		require.Equal(t, 1, get("reviews&pr=2").Find("dialog[data-delivery-open]").Length())
+		require.Contains(t, get("branches").Find("main").Text(), "PR #2")
+	})
 }

@@ -41,6 +41,7 @@ import {initRepoBranchButton} from './features/repo-branch.ts';
 import {initRepoWiki} from './features/repo-wiki.ts';
 import {initRepository, initBranchSelectorTabs} from './features/repo-legacy.ts';
 import {initCaptcha} from './features/captcha.ts';
+import {initDeliveryWorkbench} from './features/delivery-workbench.ts';
 import {initRepositoryActions} from './features/repo-actions.ts';
 import {initGlobalTooltips} from './modules/tippy.ts';
 import {initGiteaFomantic} from './modules/fomantic.ts';
@@ -144,6 +145,7 @@ const initPerformanceTracer = callInitFunctions([
   initRepoViewFileTree,
   initRepoWiki,
   initRepository,
+  initDeliveryWorkbench,
   initRepositoryActions,
   initRepositorySearch,
   initRepoContributors,
